@@ -50,7 +50,10 @@ THAI_DIGIT_MAP: dict[int, int] = str.maketrans("๐๑๒๓๔๕๖๗๘๙",
 MAX_CANDIDATE_NUM_DIGITS = 2
 
 # Valid digit-string length range for a vote count cell.
-VOTE_DIGITS_MIN = 3
+# Minimum is 2 so that double-digit votes (e.g. candidate with 60 votes)
+# are captured, while single-digit candidate numbers (1–9) in the first
+# cell are never mis-selected as votes when the vote column is empty.
+VOTE_DIGITS_MIN = 2
 VOTE_DIGITS_MAX = 7
 
 # Standard deviation threshold for the column consistency check.
