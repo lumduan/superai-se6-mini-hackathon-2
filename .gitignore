@@ -18,7 +18,10 @@ env/
 
 # OCR pipeline artefacts
 .ocr_cache/
-debug/
+debug/*
+!debug/.gitkeep
+!debug/visualise_phase4_crop.py
+!debug/phase4_crop_samples/
 checkpoint.json
 submission.csv
 
