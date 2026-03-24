@@ -227,22 +227,60 @@ class TestProcessDocumentPhase12:
         assert result["doc_3"] == 33333
 
     def test_row_shift_corrected_by_phase12(self):
-        """Row-shift scenario: OCR missed row 2, anchor alignment corrects it."""
+        """Anchor wins only when it has strictly more non-zero votes than sequential."""
         from src.pipeline.runner import process_document
 
         group = _make_group("doc", 5)
         pages = _make_pages(1)
 
-        # Parsed rows: row 2 was missed by OCR, rows 3-5 shifted up
         parsed_rows = [
             (1, "11111", "11111"),
             (3, "33333", "33333"),
             (4, "44444", "44444"),
             (5, "55555", "55555"),
         ]
-        # Sequential: wrong alignment (row shift not corrected)
+        # Sequential: 4 non-zero
         sequential = ["11111", "33333", "44444", "55555", "0"]
-        # Anchor: correct alignment with gap at position 2
+        # Anchor: 5 non-zero (strictly more) — wins
+        anchor_result = ["11111", "22222", "33333", "44444", "55555"]
+
+        with (
+            patch("src.pipeline.runner.is_table_page", return_value=True),
+            patch("src.pipeline.runner.run_full_page_ocr", return_value="<html/>"),
+            patch("src.pipeline.runner.parse_html_table", return_value=parsed_rows),
+            patch("src.pipeline.runner.extract_total_from_html", return_value=None),
+            patch("src.pipeline.runner.cross_check_vote", side_effect=lambda raw, d: d),
+            patch("src.pipeline.runner.apply_hard_rules", side_effect=lambda v: v),
+            patch("src.pipeline.runner.validate_and_correct", return_value=(sequential, True)),
+            patch("src.pipeline.runner.compute_document_confidence", return_value=0.7),
+            patch("src.pipeline.runner.needs_fallback", return_value=False),
+            patch("src.pipeline.runner.anchor_align", return_value=anchor_result),
+        ):
+            result = process_document("doc", group, pages)
+
+        # anchor_nonzero (5) > base_nonzero (4) → anchor wins
+        assert result["doc_1"] == 11111
+        assert result["doc_2"] == 22222
+        assert result["doc_3"] == 33333
+        assert result["doc_4"] == 44444
+        assert result["doc_5"] == 55555
+
+    def test_sequential_preferred_when_anchor_equal_nonzero(self):
+        """Sequential wins when anchor has same non-zero count (physical order preserved)."""
+        from src.pipeline.runner import process_document
+
+        group = _make_group("doc", 5)
+        pages = _make_pages(1)
+
+        parsed_rows = [
+            (1, "11111", "11111"),
+            (3, "33333", "33333"),
+            (4, "44444", "44444"),
+            (5, "55555", "55555"),
+        ]
+        # Sequential: 4 non-zero (physical table order)
+        sequential = ["11111", "33333", "44444", "55555", "0"]
+        # Anchor: also 4 non-zero (reordered by ballot candidate number)
         anchor_result = ["11111", "0", "33333", "44444", "55555"]
 
         with (
@@ -259,12 +297,12 @@ class TestProcessDocumentPhase12:
         ):
             result = process_document("doc", group, pages)
 
-        # Both have 4 non-zero → anchor_nonzero (4) >= base_nonzero (4) → anchor wins
+        # anchor_nonzero (4) == base_nonzero (4) → sequential wins (physical order)
         assert result["doc_1"] == 11111
-        assert result["doc_2"] == 0  # gap from missed row
-        assert result["doc_3"] == 33333
-        assert result["doc_4"] == 44444
-        assert result["doc_5"] == 55555
+        assert result["doc_2"] == 33333  # sequential order preserved
+        assert result["doc_3"] == 44444
+        assert result["doc_4"] == 55555
+        assert result["doc_5"] == 0
 
 
 # ── Test: run_pipeline limit / doc_keys params ────────────────────────────────

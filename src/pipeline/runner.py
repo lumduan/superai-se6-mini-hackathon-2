@@ -119,15 +119,15 @@ def process_document(
     anchor_nonzero = sum(v != "0" for v in anchor_votes)
     base_nonzero = sum(v != "0" for v in (base_votes[:expected] if len(base_votes) >= expected else base_votes))
 
-    if anchor_nonzero >= base_nonzero:
+    if anchor_nonzero > base_nonzero:
         logger.info(
-            "%s: Phase 12 anchor alignment selected (anchor_nonzero=%d >= base_nonzero=%d)",
+            "%s: Phase 12 anchor alignment selected (anchor_nonzero=%d > base_nonzero=%d)",
             doc_key, anchor_nonzero, base_nonzero,
         )
         final_votes = anchor_votes
     else:
         logger.info(
-            "%s: Phase 12 anchor alignment skipped (anchor_nonzero=%d < base_nonzero=%d)",
+            "%s: Phase 12 anchor alignment skipped (anchor_nonzero=%d <= base_nonzero=%d)",
             doc_key, anchor_nonzero, base_nonzero,
         )
         # Pad or truncate base_votes to exactly expected length
