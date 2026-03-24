@@ -24,6 +24,7 @@ debug/*
 !debug/debug_phase3.py
 !debug/debug_single_doc.py
 !debug/debug_phase5.py
+!debug/debug_phase6.py
 checkpoint.json
 submission.csv
 
