@@ -109,7 +109,7 @@ class TestCrossCheckVote:
         assert cross_check_vote("", "5000") == "5000"
 
     def test_same_length_low_diff_keeps_ocr(self):
-        # diff = 1 < DIGIT_DIFF_THRESHOLD(2) → keep OCR value
+        # diff = 1 < DIGIT_DIFF_THRESHOLD(3) → keep OCR value
         # Mock pythainlp to return "34405" while OCR gives "34415" (diff=1)
         with mock.patch(
             "src.phase7_thai_crosscheck.crosscheck._convert_thai_text",
@@ -119,14 +119,24 @@ class TestCrossCheckVote:
         assert result == "34415"
 
     def test_same_length_high_diff_uses_thai(self):
-        # diff ≥ DIGIT_DIFF_THRESHOLD(2) → trust Thai text
-        # Mock: Thai = "34405", OCR = "34885" → diff=2
+        # diff ≥ DIGIT_DIFF_THRESHOLD(3) → trust Thai text
+        # Thai="34405", OCR="37785" → diff=3 (positions 1,2,3 differ)
         with mock.patch(
             "src.phase7_thai_crosscheck.crosscheck._convert_thai_text",
             return_value="34405",
         ):
-            result = cross_check_vote("34,885 (สามหมื่นสี่พัน...)", "34885")
+            result = cross_check_vote("37,785 (สามหมื่นสี่พัน...)", "37785")
         assert result == "34405"
+
+    def test_same_length_diff_two_keeps_ocr(self):
+        # diff=2 < DIGIT_DIFF_THRESHOLD(3) → keep digit OCR (covers cand-11 bug)
+        # Thai text OCR can also be wrong; only override on 3+ mismatches.
+        with mock.patch(
+            "src.phase7_thai_crosscheck.crosscheck._convert_thai_text",
+            return_value="574",
+        ):
+            result = cross_check_vote("๖๙๔ (ห้าร้อยเจ็ดสิบสี่)", "694")
+        assert result == "694"
 
     def test_length_diff_one_uses_thai(self):
         # len(thai)=5, len(ocr)=4 → diff=1 → trust Thai
@@ -166,7 +176,7 @@ class TestCrossCheckVote:
 
     def test_digit_diff_threshold_boundary_below(self):
         # diff = DIGIT_DIFF_THRESHOLD - 1 → keep OCR
-        # diff = 1 when threshold = 2
+        # diff = 2 when threshold = 3
         with mock.patch(
             "src.phase7_thai_crosscheck.crosscheck._convert_thai_text",
             return_value="12345",
@@ -178,14 +188,24 @@ class TestCrossCheckVote:
         assert result == "12344"
 
     def test_digit_diff_threshold_at_threshold(self):
-        # diff = DIGIT_DIFF_THRESHOLD(2) → use Thai
+        # diff = 3 = DIGIT_DIFF_THRESHOLD(3) → use Thai
+        # Thai="12345", OCR="19955": positions 1,2,3 differ → diff=3
+        with mock.patch(
+            "src.phase7_thai_crosscheck.crosscheck._convert_thai_text",
+            return_value="12345",
+        ):
+            result = cross_check_vote("19,955 (xxx)", "19955")
+        assert result == "12345"
+
+    def test_digit_diff_below_threshold_keeps_ocr(self):
+        # diff = 2 < DIGIT_DIFF_THRESHOLD(3) → keep OCR (not overridden)
         # Thai="12345", OCR="12155": positions 2 and 3 differ → diff=2
         with mock.patch(
             "src.phase7_thai_crosscheck.crosscheck._convert_thai_text",
             return_value="12345",
         ):
             result = cross_check_vote("12,155 (xxx)", "12155")
-        assert result == "12345"
+        assert result == "12155"
 
 
 # ── _partial_thai_number ──────────────────────────────────────────────────────

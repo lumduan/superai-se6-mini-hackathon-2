@@ -170,13 +170,18 @@ def anchor_align(
 
     result: list[str] = ["0"] * expected_count
 
-    # Pass 1 — place anchored rows at their known positions
+    # Pass 1 — place anchored rows at their known positions (first-wins).
+    # When multiple pages contribute rows for the same candidate, keep the
+    # first non-zero value encountered.  Later pages (e.g. summary tables)
+    # are more prone to OCR errors and should not silently overwrite earlier
+    # accurate reads.
     for cand_num, raw, digits in anchored_rows:
         vote = cross_check_vote(raw, normalize_votes(digits))
         vote = apply_hard_rules(vote)
 
         if cand_num is not None and 1 <= cand_num <= expected_count:
-            result[cand_num - 1] = vote
+            if result[cand_num - 1] == "0":  # first-wins: skip already-filled slot
+                result[cand_num - 1] = vote
 
     # Pass 2 — fill remaining slots with unanchored rows (in order)
     no_anchor_votes = [
