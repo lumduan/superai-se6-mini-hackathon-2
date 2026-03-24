@@ -33,6 +33,7 @@ from src.phase5_ocr.ocr import (
     TYPHOON_TOP_P,
     _call_typhoon_api,
     _get_api_key,
+    run_full_page_ocr,
     run_typhoon_ocr,
 )
 
@@ -388,6 +389,93 @@ class TestModuleConstants:
 
     def test_ocr_call_sleep_non_negative(self):
         assert OCR_CALL_SLEEP >= 0
+
+
+# ── run_full_page_ocr ─────────────────────────────────────────────────────────
+
+
+class TestRunFullPageOcr:
+    """Tests for the primary Phase 5 entry point that wraps Phase 3 + OCR."""
+
+    def test_returns_text_on_success(self, tmp_path):
+        img_path = _make_png(tmp_path / "page.png")
+        fake_pil = Image.fromarray(np.full((50, 100, 3), 255, dtype=np.uint8), mode="RGB")
+        with mock.patch("src.phase5_ocr.ocr.preprocess_image", return_value=fake_pil):
+            with mock.patch("src.phase5_ocr.ocr.run_typhoon_ocr", return_value="<table></table>") as mock_ocr:
+                result = run_full_page_ocr(img_path, api_key="k")
+        assert result == "<table></table>"
+        mock_ocr.assert_called_once()
+
+    def test_passes_image_path_to_preprocess(self, tmp_path):
+        img_path = _make_png(tmp_path / "page.png")
+        fake_pil = Image.fromarray(np.full((50, 100, 3), 255, dtype=np.uint8), mode="RGB")
+        with mock.patch("src.phase5_ocr.ocr.preprocess_image", return_value=fake_pil) as mock_pre:
+            with mock.patch("src.phase5_ocr.ocr.run_typhoon_ocr", return_value=""):
+                run_full_page_ocr(img_path, api_key="k")
+        mock_pre.assert_called_once_with(img_path)
+
+    def test_passes_preprocessed_image_to_ocr(self, tmp_path):
+        img_path = _make_png(tmp_path / "page.png")
+        fake_pil = Image.fromarray(np.full((50, 100, 3), 200, dtype=np.uint8), mode="RGB")
+        with mock.patch("src.phase5_ocr.ocr.preprocess_image", return_value=fake_pil):
+            with mock.patch("src.phase5_ocr.ocr.run_typhoon_ocr", return_value="ok") as mock_ocr:
+                run_full_page_ocr(img_path, api_key="k")
+        # First positional arg to run_typhoon_ocr must be the PIL image from preprocess
+        assert mock_ocr.call_args[0][0] is fake_pil
+
+    def test_forwards_api_key(self, tmp_path):
+        img_path = _make_png(tmp_path / "page.png")
+        fake_pil = Image.fromarray(np.full((50, 100, 3), 255, dtype=np.uint8), mode="RGB")
+        with mock.patch("src.phase5_ocr.ocr.preprocess_image", return_value=fake_pil):
+            with mock.patch("src.phase5_ocr.ocr.run_typhoon_ocr", return_value="") as mock_ocr:
+                run_full_page_ocr(img_path, api_key="forwarded-key")
+        assert mock_ocr.call_args.kwargs["api_key"] == "forwarded-key"
+
+    def test_forwards_retries(self, tmp_path):
+        img_path = _make_png(tmp_path / "page.png")
+        fake_pil = Image.fromarray(np.full((50, 100, 3), 255, dtype=np.uint8), mode="RGB")
+        with mock.patch("src.phase5_ocr.ocr.preprocess_image", return_value=fake_pil):
+            with mock.patch("src.phase5_ocr.ocr.run_typhoon_ocr", return_value="") as mock_ocr:
+                run_full_page_ocr(img_path, api_key="k", retries=5)
+        assert mock_ocr.call_args.kwargs["retries"] == 5
+
+    def test_forwards_sleep_between_calls(self, tmp_path):
+        img_path = _make_png(tmp_path / "page.png")
+        fake_pil = Image.fromarray(np.full((50, 100, 3), 255, dtype=np.uint8), mode="RGB")
+        with mock.patch("src.phase5_ocr.ocr.preprocess_image", return_value=fake_pil):
+            with mock.patch("src.phase5_ocr.ocr.run_typhoon_ocr", return_value="") as mock_ocr:
+                run_full_page_ocr(img_path, api_key="k", sleep_between_calls=0)
+        assert mock_ocr.call_args.kwargs["sleep_between_calls"] == 0
+
+    def test_accepts_string_path(self, tmp_path):
+        img_path = _make_png(tmp_path / "page.png")
+        fake_pil = Image.fromarray(np.full((50, 100, 3), 255, dtype=np.uint8), mode="RGB")
+        with mock.patch("src.phase5_ocr.ocr.preprocess_image", return_value=fake_pil):
+            with mock.patch("src.phase5_ocr.ocr.run_typhoon_ocr", return_value="str-ok"):
+                result = run_full_page_ocr(str(img_path), api_key="k")
+        assert result == "str-ok"
+
+    def test_returns_empty_string_on_ocr_failure(self, tmp_path):
+        img_path = _make_png(tmp_path / "page.png")
+        fake_pil = Image.fromarray(np.full((50, 100, 3), 255, dtype=np.uint8), mode="RGB")
+        with mock.patch("src.phase5_ocr.ocr.preprocess_image", return_value=fake_pil):
+            with mock.patch("src.phase5_ocr.ocr.run_typhoon_ocr", return_value=""):
+                result = run_full_page_ocr(img_path, api_key="k")
+        assert result == ""
+
+    def test_propagates_file_not_found(self, tmp_path):
+        """preprocess_image raises FileNotFoundError for missing images."""
+        missing = tmp_path / "missing.png"
+        with pytest.raises(FileNotFoundError):
+            run_full_page_ocr(missing, api_key="k")
+
+    def test_returns_string_type(self, tmp_path):
+        img_path = _make_png(tmp_path / "page.png")
+        fake_pil = Image.fromarray(np.full((50, 100, 3), 255, dtype=np.uint8), mode="RGB")
+        with mock.patch("src.phase5_ocr.ocr.preprocess_image", return_value=fake_pil):
+            with mock.patch("src.phase5_ocr.ocr.run_typhoon_ocr", return_value="html"):
+                result = run_full_page_ocr(img_path, api_key="k")
+        assert isinstance(result, str)
 
 
 # ── Real-data tests ───────────────────────────────────────────────────────────

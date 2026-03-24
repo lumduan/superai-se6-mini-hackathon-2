@@ -1,10 +1,15 @@
-"""Phase 5 — Typhoon OCR Extraction.
+"""Phase 5 — Full-Page Typhoon OCR (Primary Path).
 
-Sends a preprocessed / cropped image to the Typhoon OCR REST API and returns
-the raw extracted text.
+Runs Typhoon OCR on the full preprocessed page — no crop.  The primary entry
+point is ``run_full_page_ocr`` which applies Phase 3 preprocessing before
+submitting the image to the API.  ``run_typhoon_ocr`` is also kept as the
+lower-level helper (accepts PIL Image or path directly) for use in multi-pass
+fallback (Phase 11).
 
 Key behaviours
 --------------
+* ``run_full_page_ocr`` preprocesses the image via Phase 3 then calls
+  ``run_typhoon_ocr`` — no crop.
 * Accepts a PIL Image *or* a file path — PIL Images are written to a
   temporary PNG and cleaned up after the call.
 * Inserts a ``sleep_between_calls`` pause before every API hit to stay inside
@@ -26,6 +31,8 @@ from pathlib import Path
 
 import requests
 from PIL import Image
+
+from src.phase3_preprocess.preprocess import preprocess_image
 
 logger = logging.getLogger(__name__)
 
@@ -219,3 +226,46 @@ def run_typhoon_ocr(
 
     logger.error("run_typhoon_ocr: all %d attempts exhausted — returning ''", retries)
     return ""
+
+
+# ── Primary pipeline entry point ──────────────────────────────────────────────
+
+
+def run_full_page_ocr(
+    image_path: str | Path,
+    api_key: str | None = None,
+    retries: int = 3,
+    sleep_between_calls: float = OCR_CALL_SLEEP,
+) -> str:
+    """Run Phase 3 preprocessing then Typhoon OCR on the full page.
+
+    This is the **primary path** described in the master plan — no crop is
+    performed.  The image is sharpened via Phase 3's ``preprocess_image``
+    before being submitted to the Typhoon OCR API.
+
+    Parameters
+    ----------
+    image_path:
+        Path to the raw scan file (PNG or any OpenCV-readable format).
+    api_key:
+        Typhoon OCR API key.  Falls back to the ``TYPHOON_OCR_API_KEY`` env
+        variable when ``None``.
+    retries:
+        Maximum number of OCR attempts before returning ``""``.
+    sleep_between_calls:
+        Seconds to wait before every API call (rate-limit guard).
+
+    Returns
+    -------
+    Extracted text string (HTML table from Typhoon), or ``""`` on failure.
+    """
+    path = Path(image_path)
+    logger.info("run_full_page_ocr: preprocessing %s", path.name)
+    preprocessed = preprocess_image(path)
+    logger.info("run_full_page_ocr: running OCR on preprocessed image")
+    return run_typhoon_ocr(
+        preprocessed,
+        api_key=api_key,
+        retries=retries,
+        sleep_between_calls=sleep_between_calls,
+    )
