@@ -204,9 +204,21 @@ Do **not** assume the table is always on page 2.
 
 Three complementary signals (union of all hits):
 
-- **Signal A — OpenCV Line Detection**: Detect dense horizontal and vertical line intersections.
+- **Signal A — OpenCV Line Detection**: Detect H×V intersections (≥ 6 required). See bug fix below.
 - **Signal B — OCR Keyword Detection**: Check for Thai table header keywords.
 - **Signal C — Row Count Heuristic**: If more than 5 digit-rich lines are found, likely a table.
+
+### Bug Fix — False Positive from Dark Fold Lines
+
+**Problem**: the original pixel-count threshold (`h_count > 500 and v_count > 200`) is trivially passed by dark fold creases on cover pages — both horizontal and vertical dark lines appear even with no table grid. This causes the cover page to be flagged as a table page, and OCR then parses district codes / dates as votes.
+
+**Fix**: count H×V intersection pixels instead of raw line pixels. Real tables have many intersections (Form สส.6/1 minimum: 4 columns × 3 rows = **8 intersections**). Fold lines produce at most 1–2.
+
+| Scenario | Before fix | After fix |
+| --- | --- | --- |
+| Real vote table | ✅ detected | ✅ detected |
+| Fold lines only | ❌ false positive | ✅ rejected |
+| Border lines only | ❌ false positive | ✅ rejected |
 
 ```python
 import os
@@ -215,6 +227,8 @@ import numpy as np
 
 TABLE_KEYWORDS = ["คะแนน", "รวมคะแนน", "พรรคการเมือง", "หมายเลข"]
 
+MIN_INTERSECTIONS = 6  # Form สส.6/1 has ≥ 8; threshold 6 is safely conservative
+
 def has_table_structure(image_path: str) -> bool:
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -222,9 +236,10 @@ def has_table_structure(image_path: str) -> bool:
     _, binary = cv2.threshold(img, 180, 255, cv2.THRESH_BINARY_INV)
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (img.shape[1] // 4, 1))
     v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, img.shape[0] // 8))
-    h_count = cv2.countNonZero(cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel))
-    v_count = cv2.countNonZero(cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel))
-    return h_count > 500 and v_count > 200
+    h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel)
+    v_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel)
+    intersections = cv2.bitwise_and(h_lines, v_lines)
+    return cv2.countNonZero(intersections) >= MIN_INTERSECTIONS
 
 
 def has_table_keywords_or_rows(image_path: str) -> bool:
