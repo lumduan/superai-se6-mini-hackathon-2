@@ -1,4 +1,4 @@
-"""Root entry point — delegates to the pipeline runner."""
+"""Entry point — run the full pipeline."""
 
 from src.pipeline.runner import run_pipeline
 

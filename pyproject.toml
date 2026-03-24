@@ -1,7 +1,33 @@
 [project]
 name = "superai-se6-mini-hackathon-2"
 version = "0.1.0"
-description = "Add your description here"
+description = "Thai Election OCR pipeline — Super AI Engineer S6 Mini Hackathon 2"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pandas>=2.0",
+    "pillow>=10.0",
+    "opencv-python>=4.8",
+    "numpy>=1.26",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pandas-stubs",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

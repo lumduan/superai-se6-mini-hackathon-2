@@ -43,10 +43,15 @@ Each constituency document is a multi-page scan:
 
 > The table is **not always on page 2**. Always dynamically detect table pages.
 
-The submission ID encodes: `constituency_{province}_{district}_{row_number}`
+The submission ID encodes two families:
 
-- `row_number` is the 1-based index of the candidate row in the data table, top-to-bottom
-- For `constituency_10_1`, rows 1–18 correspond to the 18 candidate rows on the table page
+- `constituency_{province}_{district}_{row_number}` — 1 502 rows
+- `party_list_{province}_{district}_{row_number}` — 8 551 rows
+
+`row_number` is the 1-based index of the candidate row in the data table, top-to-bottom.
+
+`party_list` IDs share the same physical scan files as their `constituency` counterpart
+(`party_list_10_1` → reads `constituency_10_1*.png`).
 
 ---
 
@@ -111,16 +116,51 @@ Submission CSV
 
 ---
 
-## Phase 1 — Data Inventory & ID Mapping
+## Phase 0 — Project Structure ✅
+
+Modular per-phase layout replacing the flat `main.py` monolith.
+
+```text
+src/
+├── config.py                  # constants + feature flags
+├── utils/                     # io, cache, checkpoint, debug
+├── phase1_mapping/            # Phase 1
+├── phase2_detection/ … phase13_align/
+└── pipeline/runner.py         # orchestrator (ThreadPoolExecutor)
+scripts/
+├── run_all.py                 # entrypoint
+├── debug_single_doc.py        # single-doc debug
+└── benchmark.py              # Levenshtein scorer
+tests/
+└── test_phase1_mapping.py
+```
+
+Key principles:
+
+- Each phase is isolated → debug stage by stage
+- `config.py` holds all thresholds and feature flags (`USE_ENSEMBLE`, `DEBUG_MODE`, etc.)
+- `pipeline/runner.py` uses `ThreadPoolExecutor` for parallel document processing
+- `utils/checkpoint.py` enables resume on crash
+- `utils/cache.py` caches OCR by image MD5
+
+---
+
+## Phase 1 — Data Inventory & ID Mapping ✅
 
 Build a complete mapping from submission IDs to their source document and row index.
+
+**Discovered:** template contains two ID families — `constituency_` (1 502 rows) and
+`party_list_` (8 551 rows).  Total: **10 053 rows**.
 
 Steps:
 
 1. Load `submission_template_v4.csv`
-2. Parse each ID into `(province, district, row_number)` components
-3. Group rows by `(province, district)` — each group = one document
-4. Determine expected row count per document
+2. Parse each ID into `(id_type, province, district, row_number)` — handles both families
+3. Group rows by `(id_type, province, district)` — each group = one `DocumentGroup`
+4. Locate physical image files (`party_list` re-uses `constituency` scan files)
+
+Module: `src/phase1_mapping/mapping.py`
+Tests: `tests/test_phase1_mapping.py` (18 tests, all passing)
 
 ```python
 import pandas as pd
