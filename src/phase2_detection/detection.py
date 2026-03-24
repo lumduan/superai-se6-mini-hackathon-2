@@ -30,10 +30,11 @@ logger = logging.getLogger(__name__)
 
 TABLE_KEYWORDS = ["คะแนน", "รวมคะแนน", "พรรคการเมือง", "หมายเลข"]
 
-# Minimum non-zero pixel counts (after morphological open) that indicate a
-# proper table grid.  Tuned on typical สส.6/1 scan dimensions.
-MIN_H_PIXELS = 500
-MIN_V_PIXELS = 200
+# Minimum H×V intersection pixels required to confirm a real table grid.
+# Form สส.6/1 has ≥ 8 intersections (4 columns × 3 rows); threshold 6 is
+# safely conservative.  Fold lines produce at most 1–2 intersections, so they
+# are correctly rejected by this check (fixes the false-positive bug).
+MIN_INTERSECTIONS = 6
 
 # Minimum digit-rich lines to trigger Signal C heuristic.
 DIGIT_LINE_THRESHOLD = 5
@@ -45,10 +46,11 @@ DIGITS_PER_LINE = 3
 # ── Signal A — OpenCV Line Detection ────────────────────────────────────────
 
 def has_table_structure(image_path: str | Path) -> bool:
-    """Return True when the page contains a dense horizontal + vertical grid.
+    """Return True when the page contains a real table grid.
 
-    Uses morphological open with long thin kernels to isolate ruled lines,
-    then checks that enough pixels survive (indicating a real table grid).
+    Computes H×V intersection pixels after morphological open.  Real tables
+    have many intersections (≥ MIN_INTERSECTIONS); fold lines produce at most
+    1–2, so they are correctly rejected (false-positive fix).
     """
     img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -67,13 +69,13 @@ def has_table_structure(image_path: str | Path) -> bool:
     h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel)
     v_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel)
 
-    h_count = cv2.countNonZero(h_lines)
-    v_count = cv2.countNonZero(v_lines)
+    intersections = cv2.bitwise_and(h_lines, v_lines)
+    n_intersections = cv2.countNonZero(intersections)
 
-    result = h_count > MIN_H_PIXELS and v_count > MIN_V_PIXELS
+    result = n_intersections >= MIN_INTERSECTIONS
     logger.debug(
-        "Signal A [%s]: h=%d v=%d → %s",
-        Path(image_path).name, h_count, v_count, result,
+        "Signal A [%s]: intersections=%d → %s",
+        Path(image_path).name, n_intersections, result,
     )
     return result
 
