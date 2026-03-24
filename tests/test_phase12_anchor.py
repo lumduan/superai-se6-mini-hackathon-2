@@ -183,13 +183,15 @@ class TestAnchorAlign:
         assert result[3] == "0"
         assert result[4] == "0"
 
-    def test_duplicate_anchor_last_wins(self):
+    def test_duplicate_anchor_first_wins(self):
+        # first-wins: when multiple pages both anchor the same candidate,
+        # keep the first non-zero value (earlier page is typically cleaner).
         rows = [
             (2, "22222", "22222"),
-            (2, "99999", "99999"),  # duplicate — last value wins
+            (2, "99999", "99999"),  # duplicate — first value is kept
         ]
         result = anchor_align(rows, 3)
-        assert result[1] == "99999"
+        assert result[1] == "22222"
 
     def test_anchor_out_of_range_low_ignored(self):
         rows = [(0, "11111", "11111")]  # cand_num=0 is invalid

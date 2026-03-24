@@ -26,7 +26,7 @@ from src.phase5_ocr import run_full_page_ocr
 from src.phase6_parse import parse_html_table
 from src.phase7_thai_crosscheck import cross_check_vote
 from src.phase8_normalize import apply_hard_rules, normalize_votes
-from src.phase9_postprocess import extract_total_from_html, validate_and_correct
+from src.phase9_postprocess import extract_total_from_html, total_based_correction, validate_and_correct
 from src.phase10_confidence import compute_document_confidence, needs_fallback
 from src.phase11_ensemble import extract_votes_multipass
 from src.phase12_anchor import anchor_align
@@ -119,21 +119,27 @@ def process_document(
     anchor_nonzero = sum(v != "0" for v in anchor_votes)
     base_nonzero = sum(v != "0" for v in (base_votes[:expected] if len(base_votes) >= expected else base_votes))
 
-    if anchor_nonzero >= base_nonzero:
+    if anchor_nonzero > base_nonzero:
         logger.info(
-            "%s: Phase 12 anchor alignment selected (anchor_nonzero=%d >= base_nonzero=%d)",
+            "%s: Phase 12 anchor alignment selected (anchor_nonzero=%d > base_nonzero=%d)",
             doc_key, anchor_nonzero, base_nonzero,
         )
         final_votes = anchor_votes
     else:
         logger.info(
-            "%s: Phase 12 anchor alignment skipped (anchor_nonzero=%d < base_nonzero=%d)",
+            "%s: Phase 12 anchor alignment skipped (anchor_nonzero=%d <= base_nonzero=%d)",
             doc_key, anchor_nonzero, base_nonzero,
         )
         # Pad or truncate base_votes to exactly expected length
         if len(base_votes) < expected:
             base_votes = base_votes + ["0"] * (expected - len(base_votes))
         final_votes = base_votes[:expected]
+
+    # Re-apply Phase 9 total-based correction on the final ordered votes.
+    # Phase 9 was run earlier on sequential (unordered) votes; applying it
+    # again here ensures the checksum correction targets the correct row
+    # in the properly ordered final list.
+    final_votes = list(total_based_correction(final_votes, ocr_total))
 
     # Map final votes back to submission row IDs
     for i, row in enumerate(group.rows):

@@ -49,3 +49,5 @@ Thumbs.db
 
 # Python version managers
 .python-version
+
+smoke_output.csv

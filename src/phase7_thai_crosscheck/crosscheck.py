@@ -35,9 +35,12 @@ logger = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Number of digit mismatches that triggers a preference for Thai text value.
-# A diff of 1 is considered OCR noise (keep digit OCR result).
-# A diff ≥ 2 is considered reliable enough to trust the Thai spelling instead.
-DIGIT_DIFF_THRESHOLD = 2
+# A diff of 1-2 is considered OCR noise (keep digit OCR result).
+# A diff ≥ 3 is considered reliable enough to trust the Thai spelling instead.
+# Threshold raised from 2 → 3: Thai digit numerals (๖๙๔) are more reliably
+# OCR'd than Thai number words; a 2-digit mismatch is still within typical
+# word-OCR noise and should not override the numeral reading.
+DIGIT_DIFF_THRESHOLD = 3
 
 # If lengths differ by exactly this value, trust the Thai text length.
 ACCEPTABLE_LENGTH_DIFF = 1

@@ -56,12 +56,20 @@ class TestExtractVoteCell:
         raw, digits = extract_vote_cell(cells)
         assert digits == "12345"
 
-    def test_too_short_digits_skipped(self):
-        # Only 2 digits — below VOTE_DIGITS_MIN=3 — should not be selected.
-        cells = ["1", "name", "42"]
+    def test_no_digit_cells_return_none(self):
+        # No cell with >= VOTE_DIGITS_MIN digits → must return (None, None).
+        # "1" is single-digit (< 2) and "--" has zero digits, so nothing qualifies.
+        cells = ["1", "name", "party", "--"]
         raw, digits = extract_vote_cell(cells)
         assert raw is None
         assert digits is None
+
+    def test_two_digit_vote_captured(self):
+        # Two-digit vote (e.g. candidate 18 with 60 votes) — VOTE_DIGITS_MIN=2 captures it.
+        cells = ["18", "name", "party", "60"]
+        raw, digits = extract_vote_cell(cells)
+        assert digits == "60"
+        assert raw == "60"
 
     def test_too_long_digits_skipped(self):
         # 8 digits — above VOTE_DIGITS_MAX=7 — should not be selected.
@@ -76,8 +84,10 @@ class TestExtractVoteCell:
         assert digits is None
 
     def test_boundary_min(self):
-        cells = ["1", "xxx", "123"]
+        # Exactly VOTE_DIGITS_MIN=2 digits — must be accepted.
+        cells = ["1", "xxx", "42"]
         raw, digits = extract_vote_cell(cells)
+        assert digits == "42"
         assert len(digits) == VOTE_DIGITS_MIN
 
     def test_boundary_max(self):
@@ -286,7 +296,8 @@ class TestParseVotesFromMarkdown:
         assert results[0][2] == "11111"
 
     def test_no_valid_vote_cell_in_row(self):
-        # Row with no cell having 3–7 digits → skipped
+        # Row where vote column is "--" and no other cell has >= 2 digits → skipped.
+        # Candidate number "1" has only 1 digit (< VOTE_DIGITS_MIN=2), so nothing qualifies.
         markdown = "| 1 | name | party | -- |"
         results = parse_votes_from_markdown(markdown)
         assert results == []
