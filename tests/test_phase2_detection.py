@@ -14,8 +14,7 @@ from PIL import Image
 from src.phase2_detection.detection import (
     DIGIT_LINE_THRESHOLD,
     DIGITS_PER_LINE,
-    MIN_H_PIXELS,
-    MIN_V_PIXELS,
+    MIN_INTERSECTIONS,
     TABLE_KEYWORDS,
     _ocr_text,
     get_table_pages,
@@ -78,9 +77,20 @@ class TestHasTableStructure:
         _make_grid_image(p)
         assert has_table_structure(str(p)) is True
 
-    def test_thresholds_are_positive(self):
-        assert MIN_H_PIXELS > 0
-        assert MIN_V_PIXELS > 0
+    def test_min_intersections_is_positive(self):
+        assert MIN_INTERSECTIONS > 0
+
+    def test_fold_line_image_rejected(self, tmp_path):
+        """A page with only horizontal + vertical fold lines (no real grid)
+        must NOT trigger Signal A (false-positive fix)."""
+        p = tmp_path / "fold.png"
+        # Build image with a single dark horizontal and a single vertical
+        # stripe — mimics a fold crease, not a table.
+        arr = np.full((1000, 800), 255, dtype=np.uint8)
+        arr[500, :] = 0   # one horizontal fold line
+        arr[:, 400] = 0   # one vertical fold line
+        _write_gray_png(p, arr)
+        assert has_table_structure(p) is False
 
 
 # ── Signal B — has_table_keywords ────────────────────────────────────────────
