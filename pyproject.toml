@@ -11,6 +11,7 @@ dependencies = [
     "numpy>=1.26",
     "requests>=2.31",
     "pytesseract>=0.3",
+    "beautifulsoup4>=4.12",
 ]
 
 [project.optional-dependencies]
