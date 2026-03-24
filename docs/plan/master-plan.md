@@ -8,13 +8,14 @@ Given PNG scans of official election documents, the task is to:
 
 1. Dynamically detect which pages contain vote count tables
 2. Preprocess images (angle-limited deskew, CLAHE, sharpen) before OCR
-3. Adaptively crop the vote count column; try multiple ratios as diverse ensemble candidates
-4. Use Typhoon OCR across 5 diverse passes with ensemble voting
-5. Cross-check digits against Thai number text with digit-level diff + partial regex fallback
-6. Apply soft confidence penalties instead of hard value cutoffs
-7. Apply total-based correction targeting the lowest-confidence row
-8. Align rows using candidate number anchors to prevent row-shift errors
-9. Submit only `id,votes` for every row in the template
+3. Run full-page Typhoon OCR (primary path) — returns HTML table output
+4. Parse HTML table with BeautifulSoup; crop-based OCR is a fallback only
+5. Use Typhoon OCR across 5 diverse passes with ensemble voting (full-page first)
+6. Cross-check digits against Thai number text with digit-level diff + partial regex fallback
+7. Apply soft confidence penalties instead of hard value cutoffs
+8. Apply total-based correction targeting the lowest-confidence row
+9. Align rows using candidate number anchors to prevent row-shift errors
+10. Submit only `id,votes` for every row in the template
 
 ---
 
@@ -62,14 +63,11 @@ Image set (all pages for a document)
   ↓
 Dynamic table page detection (OpenCV + keyword + row heuristic)
   ↓
-Image preprocessing (deskew + CLAHE + sharpen)
+Image preprocessing (deskew + CLAHE + sharpen)   ← full-page only, no crop
   ↓
-Adaptive vote column crop  (Mode A — column only)
-Full-page image             (Mode B — fallback context)
+Typhoon OCR — full page (PRIMARY path)
   ↓
-Typhoon OCR
-  ↓
-Pattern-aware parsing (3–7 digit filter)
+HTML table parsing with BeautifulSoup
 + Column consistency check (variance guard)
   ↓
 Thai text cross-check (digit-level diff)
@@ -81,7 +79,7 @@ Row structure validation
   ↓
 Per-row confidence scoring
   ↓  (low confidence or large mismatch)
-Multi-pass fallback OCR
+Multi-pass fallback OCR (full-page passes first; crop passes as last resort)
 + Per-row ensemble voting (length-normalized)
   ↓
 Row anchor alignment (candidate number anchors)
@@ -99,10 +97,10 @@ Submission CSV
 
 - Phase 1 — Data Inventory & ID Mapping
 - Phase 2 — Dynamic Table Page Detection
-- Phase 3 — Image Preprocessing
-- Phase 4 — Adaptive Vote Column Crop
-- Phase 5 — Typhoon OCR Extraction
-- Phase 6 — Pattern-aware Parsing & Column Consistency
+- Phase 3 — Image Preprocessing (deskew + CLAHE + sharpen, full-page only)
+- Phase 4 — Adaptive Vote Column Crop *(demoted to fallback — runs only on low confidence)*
+- Phase 5 — Full-Page Typhoon OCR (primary path)
+- Phase 6 — HTML Table Parsing with BeautifulSoup
 - Phase 7 — Thai Text Cross-check (Digit-level Diff)
 - Phase 8 — Normalization & Hard Rule Overrides
 - Phase 9 — Row Structure Validation & Total-based Correction
@@ -138,10 +136,26 @@ tests/
 Key principles:
 
 - Each phase is isolated → debug stage by stage
-- `config.py` holds all thresholds and feature flags (`USE_ENSEMBLE`, `DEBUG_MODE`, etc.)
+- `config.py` holds all thresholds and feature flags (`USE_ENSEMBLE`, `DEBUG_MODE`, `USE_FULL_PAGE_OCR`, etc.)
 - `pipeline/runner.py` uses `ThreadPoolExecutor` for parallel document processing
 - `utils/checkpoint.py` enables resume on crash
 - `utils/cache.py` caches OCR by image MD5
+
+New flag added to `config.py`:
+
+```python
+USE_FULL_PAGE_OCR = True  # True = full-page OCR primary; False = crop-first (legacy)
+```
+
+### Files Modified by the Phase 3→6 Redesign
+
+| File | Action |
+| --- | --- |
+| `phase4_crop/crop.py` | Move everything to `fallback_crop()` helper — no longer called by default |
+| `phase5_ocr/typhoon.py` | Change default call to full-page (`run_full_page_ocr`) |
+| `phase6_parse/parser.py` | **Rewrite** to use BeautifulSoup for HTML table parsing |
+| `phase11_ensemble/multipass.py` | Swap pass order — full-page passes 1–2, crop passes 3–4 |
+| `config.py` | Add `USE_FULL_PAGE_OCR = True` flag |
 
 ---
 
@@ -238,7 +252,9 @@ def get_table_pages(doc_key: str, data_dir: str = "data/images") -> list[str]:
 
 ## Phase 3 — Image Preprocessing
 
-Apply image corrections before OCR to recover scan quality. This improves Typhoon OCR accuracy by 5–15% on low-quality scans.
+Apply image corrections to the full-page image before OCR to recover scan quality. This improves Typhoon OCR accuracy by 5–15% on low-quality scans.
+
+**Scope:** deskew + CLAHE + sharpen only. No crop logic here — cropping is Phase 4 (fallback only).
 
 Three corrections applied in order:
 
@@ -296,14 +312,16 @@ def preprocess_image(image_path: str) -> Image.Image:
 
 ---
 
-## Phase 4 — Adaptive Vote Column Crop
+## Phase 4 — Adaptive Vote Column Crop *(Fallback only — not the primary path)*
+
+> **This phase is no longer the main path.** Full-page OCR (Phase 5) runs first. Phase 4 is called only when full-page OCR returns low confidence. All crop functions are kept as `fallback_crop()` helpers for use in Phase 11 (passes 3+).
 
 Dynamically detect the rightmost column boundary and crop only the vote count column.
 
 Two crop modes:
 
-- **Mode A (default)**: adaptive crop of the rightmost column — reduces noise, +10–30% accuracy
-- **Mode B (fallback)**: full-page image — preserves context when crop loses too much signal
+- **Mode A (crop fallback)**: adaptive crop of the rightmost column — used in ensemble pass 3+
+- **Mode B (full-page)**: now the primary input — handled in Phase 5
 
 ```python
 from PIL import Image
@@ -357,68 +375,177 @@ def all_fallback_crops(image_path: str) -> list[Image.Image]:
 
 ---
 
-## Phase 5 — Typhoon OCR Extraction
+## Phase 5 — Full-Page Typhoon OCR (Primary Path)
 
-Run Typhoon OCR on the preprocessed and cropped image.
+Run Typhoon OCR on the **full preprocessed page** — no crop. Typhoon returns an HTML table which is parsed in Phase 6.
+
+```python
+def run_full_page_ocr(image_path: str) -> str:
+    preprocessed = preprocess_image(image_path)
+    return run_typhoon_ocr(preprocessed)  # full page, no crop
+```
+
+Typhoon returns HTML structured like:
+
+```html
+<table>
+  <tr><td>6</td><td>Mr. Khetarat...</td><td>Bhumjaithai</td><td>10,778 (ten thousand...)</td></tr>
+  ...
+  <tr><td colspan="3">Total score</td><td>77,982 (...)</td></tr>
+</table>
+```
+
+### Typhoon API
 
 **Setup**
 
+No additional package installation needed — the Typhoon OCR integration uses
+the `requests` library (already a project dependency) to call the REST API
+directly.
+
 ```bash
-pip install typhoon-ocr pillow opencv-python pytesseract pythainlp rapidfuzz
 export TYPHOON_OCR_API_KEY=your_api_key_here
 ```
 
-**Model**: `typhoon-ocr` v1.5 (2B) — Rate limit: 2 req/s, 20 req/min
+**API endpoint**: `https://api.opentyphoon.ai/v1/ocr`
+
+**Model**: `typhoon-ocr` — Rate limit: 2 req/s, 20 req/min
 
 ```python
+import json
 import time
 import tempfile
 import os
-from typhoon_ocr import ocr_document
+import requests
+from pathlib import Path
+from PIL import Image
 
-def run_typhoon_ocr(image, retries: int = 3) -> str:
-    if not isinstance(image, str):
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp_path = tmp.name
-        image.save(tmp_path)
-        path, cleanup = tmp_path, True
+TYPHOON_OCR_URL = "https://api.opentyphoon.ai/v1/ocr"
+
+def run_typhoon_ocr(image, api_key: str | None = None, retries: int = 3) -> str:
+    key = api_key or os.environ.get("TYPHOON_OCR_API_KEY", "")
+
+    cleanup = False
+    if isinstance(image, (str, Path)):
+        path = Path(image)
     else:
-        path, cleanup = image, False
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.close()
+        path = Path(tmp.name)
+        image.save(path)
+        cleanup = True
 
-    for attempt in range(retries):
-        try:
-            result = ocr_document(pdf_or_image_path=path)
-            if cleanup:
-                os.unlink(tmp_path)
-            return result
-        except Exception as e:
-            wait = 2 ** attempt
-            print(f"  Attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
-            time.sleep(wait)
+    try:
+        for attempt in range(retries):
+            if attempt > 0:
+                time.sleep(2 ** (attempt - 1))
+            time.sleep(0.5)  # respect 2 req/s rate limit
+            try:
+                with open(path, "rb") as fh:
+                    response = requests.post(
+                        TYPHOON_OCR_URL,
+                        files={"file": fh},
+                        data={
+                            "model": "typhoon-ocr",
+                            "task_type": "default",
+                            "max_tokens": "16384",
+                            "temperature": "0.1",
+                            "top_p": "0.6",
+                            "repetition_penalty": "1.2",
+                        },
+                        headers={"Authorization": f"Bearer {key}"},
+                    )
+                response.raise_for_status()
+                texts = []
+                for page in response.json().get("results", []):
+                    if page.get("success") and page.get("message"):
+                        content = page["message"]["choices"][0]["message"]["content"]
+                        try:
+                            texts.append(json.loads(content).get("natural_text", content))
+                        except json.JSONDecodeError:
+                            texts.append(content)
+                return "\n".join(texts)
+            except Exception as e:
+                print(f"  Attempt {attempt+1} failed: {e}")
+    finally:
+        if cleanup and path.exists():
+            path.unlink()
 
-    if cleanup and os.path.exists(tmp_path):
-        os.unlink(tmp_path)
     return ""
 ```
 
-> Add `time.sleep(0.5)` between successive OCR calls to respect the rate limit.
+> `time.sleep(0.5)` is inserted before every call to respect the 2 req/s rate
+> limit.  Exponential back-off (1 s, 2 s, …) is applied between retries.
 
 ---
 
-## Phase 6 — Pattern-aware Parsing & Column Consistency
+## Phase 6 — HTML Table Parsing with BeautifulSoup
 
-**Pattern-aware cell selector**: only accept cells whose digit sequence is 3–7 characters long, filtering out candidate numbers (1–2 digits) and OCR garbage.
+**Primary parser**: Typhoon now returns HTML tables. Parse with BeautifulSoup — no line-by-line markdown buffer needed.
+
+Advantages over the old markdown parser:
+
+- **Robust for multi-column colspan** — BeautifulSoup handles it automatically
+- **No line-by-line buffer** — HTML structure is unambiguous
+- **Column ambiguity eliminated** — Typhoon labels each cell directly
 
 After extraction, apply a **column consistency check** — high variance in digit lengths within a single document suggests wrong column or severe misalignment.
 
 ```python
 import re
 import statistics
+from bs4 import BeautifulSoup
 
 SKIP_PATTERNS = [
     "รวมคะแนน", "รวมทั้งสิ้น",
     "หมายเลข", "ชื่อ-สกุล", "พรรคการเมือง", "คะแนน",
 ]
+
+THAI_DIGIT_MAP = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
+
+
+def parse_html_table(html: str) -> list[tuple[int | None, str, str]]:
+    """
+    Parse HTML table output from Typhoon OCR.
+    Returns list of (candidate_num, raw_vote_cell, digit_string).
+    Falls back to markdown parsing if no <table> tag found.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    rows = soup.find_all("tr")
+    if not rows:
+        return parse_votes_from_markdown(html)  # markdown fallback
+
+    results = []
+    for row in rows:
+        cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+        if not cells:
+            continue
+
+        # Skip header / total rows
+        if any(kw in " ".join(cells) for kw in SKIP_PATTERNS):
+            continue
+
+        # Extract candidate number from first cell (1–2 digits)
+        cand_num = None
+        first_digits = "".join(c for c in cells[0] if c.isdigit() or c in "0123456789")
+        first_digits = first_digits.translate(THAI_DIGIT_MAP)
+        if first_digits and len(first_digits) <= 2:
+            cand_num = int(first_digits)
+
+        # Vote cell = last cell with 3–7 digits after Thai→Arabic normalisation
+        vote_cell = None
+        for cell in reversed(cells):
+            normalized = cell.translate(THAI_DIGIT_MAP)
+            digits = "".join(c for c in normalized if c.isdigit())
+            if 3 <= len(digits) <= 7:
+                vote_cell = (cell, digits)
+                break
+
+        if vote_cell:
+            results.append((cand_num, vote_cell[0], vote_cell[1]))
+
+    return results
+
 
 def extract_vote_cell(cells: list[str]) -> tuple[str | None, str | None]:
     """Return (raw_cell, digit_string) for the last cell with 3–7 digits."""
@@ -429,8 +556,8 @@ def extract_vote_cell(cells: list[str]) -> tuple[str | None, str | None]:
     return None, None
 
 
-def parse_votes_from_markdown(markdown: str) -> list[tuple[str, str]]:
-    """Returns list of (raw_cell, digit_string) tuples."""
+def parse_votes_from_markdown(markdown: str) -> list[tuple[int | None, str, str]]:
+    """Markdown fallback parser — used when Typhoon output has no HTML table."""
     result = []
     buffer = ""
     for line in markdown.splitlines():
@@ -450,7 +577,7 @@ def parse_votes_from_markdown(markdown: str) -> list[tuple[str, str]]:
         raw, digits = extract_vote_cell(cells)
         if raw is None:
             continue
-        result.append((raw, digits))
+        result.append((None, raw, digits))
         buffer = ""
     return result
 
@@ -756,16 +883,17 @@ def needs_fallback(votes: list[str], expected: int, confidence: float) -> bool:
 
 ## Phase 11 — Multi-pass Fallback OCR & Ensemble Voting
 
-Run up to 4 OCR passes. Aggregate per-row votes via **length-normalized weighted voting** using per-row confidence.
+Run up to 5 OCR passes. **Full-page passes come first** (passes 1–2) for structural diversity; crop-based passes are used only as later fallbacks (passes 3–4). Aggregate per-row votes via **length-normalized weighted voting** using per-row confidence.
 
-**Passes**
+### Passes
 
 | Pass | Input | Model |
 | --- | --- | --- |
-| Pass 1 | Preprocessed + cropped (Mode A) | Typhoon OCR |
-| Pass 2 | Preprocessed + full image (Mode B) | Typhoon OCR |
-| Pass 3 | Full image (Otsu threshold only) | Typhoon OCR |
-| Pass 4 | Full image | Tesseract (tha+eng) |
+| Pass 1 | Full preprocessed page | Typhoon OCR ← **PRIMARY** |
+| Pass 2 | Full page (Otsu threshold only) | Typhoon OCR ← structural diversity |
+| Pass 3 | Crop 0.70 + OCR | Typhoon OCR ← original fallback |
+| Pass 4 | Crop 0.75–0.85 (various) + OCR | Typhoon OCR ← original fallback |
+| Pass 5 | Full page | Tesseract (tha+eng) ← independent model |
 
 **Length normalization before voting** — prevent index-shifted votes from corrupting the ensemble.
 
@@ -824,18 +952,18 @@ def ensemble_votes(candidates: list[tuple[float, list[str]]], expected: int) -> 
 def extract_votes_multipass(image_path: str, expected: int) -> list[str]:
     """
     Run multiple diverse OCR passes to reduce correlated errors.
-    Passes 1–4 use Typhoon with different inputs (crop ratio, preprocessing, blur)
-    to ensure the ensemble candidates are not all from the same error mode.
+    Full-page passes come first (passes 1–2) for structural diversity.
+    Crop-based passes are used only as later fallbacks (passes 3–4).
     Pass 5 uses Tesseract as a structurally independent fallback.
     """
     preprocessed = preprocess_image(image_path)
     candidates = []
 
     def run_pass(label, image):
-        md = run_typhoon_ocr(image)
-        total = extract_total_from_markdown(md)
-        raw_pairs = parse_votes_from_markdown(md)
-        votes = [cross_check_vote(raw, normalize_votes(digits)) for raw, digits in raw_pairs]
+        html = run_typhoon_ocr(image)
+        parsed = parse_html_table(html)  # returns list of (cand_num, raw, digits)
+        total = extract_total_from_html(html)
+        votes = [cross_check_vote(raw, normalize_votes(digits)) for _, raw, digits in parsed]
         votes = [apply_hard_rules(v) for v in votes]
         votes = total_based_correction(votes, total)
         conf = compute_document_confidence(votes, expected, total)
@@ -843,18 +971,18 @@ def extract_votes_multipass(image_path: str, expected: int) -> list[str]:
         candidates.append((conf, votes))
         return conf, votes
 
-    # Pass 1: adaptive crop (Mode A — primary)
-    conf, votes = run_pass("Pass 1 (typhoon adaptive crop)", crop_vote_column(image_path))
+    # Pass 1: full preprocessed page (PRIMARY)
+    conf, votes = run_pass("Pass 1 (typhoon full preprocessed)", preprocessed)
     if not needs_fallback(votes, expected, conf):
         return apply_sanity_checks(normalize_length(votes, expected))
 
-    # Pass 2: full preprocessed image (Mode B — different context)
-    run_pass("Pass 2 (typhoon full preprocessed)", preprocessed)
-
-    # Pass 3: Otsu-threshold only (structurally different from CLAHE)
-    conf, _ = run_pass("Pass 3 (typhoon otsu)", preprocess_otsu(image_path))
+    # Pass 2: Otsu-threshold only (structurally different from CLAHE)
+    conf, _ = run_pass("Pass 2 (typhoon otsu)", preprocess_otsu(image_path))
     if not needs_fallback(votes, expected, conf):
         return apply_sanity_checks(normalize_length(votes, expected))
+
+    # Pass 3: adaptive crop (original fallback — crop 0.70)
+    run_pass("Pass 3 (typhoon adaptive crop)", crop_vote_column(image_path))
 
     # Pass 4: diverse fallback crops — add each ratio as a separate candidate
     # This breaks correlation by varying the crop boundary systematically
@@ -899,6 +1027,8 @@ def apply_sanity_checks(votes: list[str]) -> list[str]:
 If OCR misses a row (e.g., row 3), all subsequent rows shift by one position, causing cascading misalignment. Detect and correct this using **candidate number anchors**.
 
 The data table includes a candidate number in the first cell of each row (1, 2, 3...). Extract these alongside votes and use them to realign.
+
+> **Input format unchanged**: `parse_html_table()` returns `list[tuple[int|None, str, str]]` — the same `(candidate_num, raw_cell, digit_string)` format used by the previous markdown parser. No changes needed here.
 
 ```python
 def extract_anchored_rows(markdown: str) -> list[tuple[int | None, str, str]]:

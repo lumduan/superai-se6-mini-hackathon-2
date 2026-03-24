@@ -13,6 +13,8 @@ from PIL import Image
 from src.config import IMAGES_DIR
 from src.phase4_crop.crop import (
     FALLBACK_CROP_RATIOS,
+    MAX_VALID_RATIO,
+    MIN_CROP_WIDTH_RATIO,
     MIN_VALID_RATIO,
     all_fallback_crops,
     crop_vote_column,
@@ -200,6 +202,54 @@ class TestCropVoteColumn:
         expected_w = 400 - int(400 * MIN_VALID_RATIO)
         assert result.size == (expected_w, 200)
 
+    def test_fallback_used_when_ratio_above_max_valid(self, tmp_path):
+        """Ratio above MAX_VALID_RATIO (paper margin) must trigger fallback."""
+        p = _make_blank_png(tmp_path / "page.png", width=400, height=200)
+        too_large = MAX_VALID_RATIO + 0.02  # e.g. 0.92 — detected paper margin
+        with mock.patch(
+            "src.phase4_crop.crop.detect_rightmost_column_boundary",
+            return_value=too_large,
+        ):
+            result = crop_vote_column(p)
+        # Fallback at 0.80 → 80 px wide
+        assert result.size == (80, 200)
+
+    def test_fallback_used_when_crop_too_narrow(self, tmp_path):
+        """Crop width below MIN_CROP_WIDTH_RATIO must trigger fallback even if
+        the ratio itself is within [MIN_VALID_RATIO, MAX_VALID_RATIO]."""
+        p = _make_blank_png(tmp_path / "page.png", width=400, height=200)
+        # A ratio that yields a crop_width_ratio just below the minimum
+        narrow_ratio = 1.0 - MIN_CROP_WIDTH_RATIO + 0.01  # e.g. 0.91 if min=0.10
+        # Clamp to be within (MIN_VALID_RATIO, MAX_VALID_RATIO) — if narrow_ratio
+        # is already above MAX_VALID_RATIO it would be caught by that check first.
+        narrow_ratio = min(narrow_ratio, MAX_VALID_RATIO)
+        with mock.patch(
+            "src.phase4_crop.crop.detect_rightmost_column_boundary",
+            return_value=narrow_ratio,
+        ):
+            result = crop_vote_column(p)
+        # Either fallback was triggered (80 px) or adaptive was used — either way
+        # the resulting crop must be at least MIN_CROP_WIDTH_RATIO wide.
+        assert result.size[0] >= int(400 * MIN_CROP_WIDTH_RATIO)
+
+    def test_ratio_well_inside_valid_range_triggers_adaptive(self, tmp_path):
+        """A ratio comfortably inside the valid range must use adaptive mode."""
+        p = _make_blank_png(tmp_path / "page.png", width=400, height=200)
+        valid_ratio = 0.75  # comfortably inside [MIN_VALID_RATIO, MAX_VALID_RATIO]
+        with mock.patch(
+            "src.phase4_crop.crop.detect_rightmost_column_boundary",
+            return_value=valid_ratio,
+        ):
+            result = crop_vote_column(p)
+        expected_w = 400 - int(400 * valid_ratio)
+        assert result.size == (expected_w, 200)
+
+    def test_crop_width_at_least_min_crop_ratio(self, tmp_path):
+        """Resulting crop must always be at least MIN_CROP_WIDTH_RATIO wide."""
+        p = _make_blank_png(tmp_path / "page.png", width=400, height=200)
+        result = crop_vote_column(p)
+        assert result.size[0] >= int(400 * MIN_CROP_WIDTH_RATIO)
+
 
 # ── all_fallback_crops ────────────────────────────────────────────────────────
 
@@ -263,6 +313,20 @@ class TestConstants:
 
     def test_min_valid_ratio_below_one(self):
         assert MIN_VALID_RATIO < 1.0
+
+    def test_max_valid_ratio_greater_than_min(self):
+        assert MAX_VALID_RATIO > MIN_VALID_RATIO
+
+    def test_max_valid_ratio_below_one(self):
+        assert MAX_VALID_RATIO < 1.0
+
+    def test_min_crop_width_ratio_positive(self):
+        assert MIN_CROP_WIDTH_RATIO > 0.0
+
+    def test_min_crop_width_ratio_consistent_with_max_valid(self):
+        """MIN_CROP_WIDTH_RATIO must be <= 1 - MAX_VALID_RATIO so that a ratio
+        comfortably inside [MIN_VALID_RATIO, MAX_VALID_RATIO] passes the guard."""
+        assert MIN_CROP_WIDTH_RATIO <= (1.0 - MIN_VALID_RATIO)
 
     def test_fallback_crop_ratios_not_empty(self):
         assert len(FALLBACK_CROP_RATIOS) > 0

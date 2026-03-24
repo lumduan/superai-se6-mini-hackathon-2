@@ -2,6 +2,8 @@
 
 from .crop import (
     FALLBACK_CROP_RATIOS,
+    MAX_VALID_RATIO,
+    MIN_CROP_WIDTH_RATIO,
     MIN_VALID_RATIO,
     all_fallback_crops,
     crop_vote_column,
@@ -10,6 +12,8 @@ from .crop import (
 
 __all__ = [
     "FALLBACK_CROP_RATIOS",
+    "MAX_VALID_RATIO",
+    "MIN_CROP_WIDTH_RATIO",
     "MIN_VALID_RATIO",
     "all_fallback_crops",
     "crop_vote_column",

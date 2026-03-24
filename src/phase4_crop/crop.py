@@ -33,6 +33,17 @@ FALLBACK_CROP_RATIOS: list[float] = [0.70, 0.75, 0.80, 0.85]
 # Ratios below this (< 50 % from left) likely capture too much non-vote area.
 MIN_VALID_RATIO = 0.5
 
+# Maximum left-ratio accepted from detection.
+# Ratios above this (> 90 % from left) almost certainly hit a paper margin
+# rather than a real table column line, leaving less than 10 % of the image
+# width — which is too narrow to contain meaningful vote data.
+MAX_VALID_RATIO = 0.90
+
+# Minimum crop width as a fraction of image width.
+# Even with a ratio inside [MIN_VALID_RATIO, MAX_VALID_RATIO], if the
+# resulting crop is thinner than this we fall back to the fixed ratio.
+MIN_CROP_WIDTH_RATIO = 0.10
+
 
 # ── Core detection ────────────────────────────────────────────────────────────
 
@@ -96,11 +107,14 @@ def crop_vote_column(image_path: str | Path) -> Image.Image:
     """Adaptively crop the vote column from a scan.
 
     **Mode A** — adaptive: runs vertical-line detection; if a boundary is
-    found at ratio ≥ ``MIN_VALID_RATIO``, crops from that x-position to the
-    right edge.
+    found within [``MIN_VALID_RATIO``, ``MAX_VALID_RATIO``] *and* the
+    resulting crop width is at least ``MIN_CROP_WIDTH_RATIO`` of the image
+    width, crops from that x-position to the right edge.
 
-    **Mode B** — fallback: when detection fails (or returns a ratio that is
-    too small), crops at the conservative default ratio of 0.80.
+    **Mode B** — fallback: when detection fails, or the detected ratio is
+    outside the valid range, or the crop would be too narrow (likely a paper
+    margin rather than a real table column), crops at the conservative default
+    ratio of 0.80.
 
     Parameters
     ----------
@@ -120,24 +134,42 @@ def crop_vote_column(image_path: str | Path) -> Image.Image:
 
     left_ratio = detect_rightmost_column_boundary(path)
 
-    if left_ratio is not None and left_ratio >= MIN_VALID_RATIO:
-        img = Image.open(path)
-        w, h = img.size
-        left_px = int(w * left_ratio)
-        logger.info(
-            "crop_vote_column: adaptive crop at x=%d (ratio=%.3f) for %s",
-            left_px,
-            left_ratio,
-            path.name,
+    if left_ratio is not None:
+        crop_width_ratio = 1.0 - left_ratio
+        valid = (
+            MIN_VALID_RATIO <= left_ratio <= MAX_VALID_RATIO
+            and crop_width_ratio >= MIN_CROP_WIDTH_RATIO
         )
-        return img.crop((left_px, 0, w, h))
+        if valid:
+            img = Image.open(path)
+            w, h = img.size
+            left_px = int(w * left_ratio)
+            logger.info(
+                "crop_vote_column: adaptive crop at x=%d (ratio=%.3f, crop_w=%.1f%%) for %s",
+                left_px,
+                left_ratio,
+                crop_width_ratio * 100,
+                path.name,
+            )
+            return img.crop((left_px, 0, w, h))
+        else:
+            logger.debug(
+                "crop_vote_column: detected ratio %.3f rejected "
+                "(valid range=[%.2f, %.2f], crop_width_ratio=%.3f min=%.2f) for %s",
+                left_ratio,
+                MIN_VALID_RATIO,
+                MAX_VALID_RATIO,
+                crop_width_ratio,
+                MIN_CROP_WIDTH_RATIO,
+                path.name,
+            )
 
-    # Detection failed or ratio is too small — use conservative fallback.
+    # Detection failed or ratio outside valid range — use conservative fallback.
     fallback_ratio = 0.80
     logger.info(
-        "crop_vote_column: adaptive crop failed for %s, using fallback ratio %.2f",
-        path.name,
+        "crop_vote_column: using fallback ratio %.2f for %s",
         fallback_ratio,
+        path.name,
     )
     img = Image.open(path)
     w, h = img.size
