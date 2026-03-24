@@ -2,6 +2,12 @@
 
 import argparse
 import logging
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.config import IMAGES_DIR, SUBMISSION_TEMPLATE
 from src.phase1_mapping.mapping import build_inventory, print_inventory_summary

@@ -36,6 +36,18 @@ TABLE_KEYWORDS = ["คะแนน", "รวมคะแนน", "พรรค�
 # are correctly rejected by this check (fixes the false-positive bug).
 MIN_INTERSECTIONS = 6
 
+# Maximum vertical kernel height in pixels.  Some scans have short column
+# borders (≤ 230 px on a 3507-px-tall page), so h // 8 (≈ 438 px) misses
+# them entirely.  Capping at 200 px ensures those short borders are detected
+# while still being long enough to reject noise and text strokes.
+MAX_V_KERNEL_HEIGHT = 200
+
+# Horizontal kernel width divisor.  Using w // 4 (≈ 620 px) misses tables
+# whose horizontal rules are shorter than the full page width (e.g. a small
+# 2-row summary table at the bottom of a cover page).  w // 6 (≈ 413 px) is
+# short enough to detect those while still rejecting fold lines / headers.
+H_KERNEL_WIDTH_DIVISOR = 6
+
 # Minimum digit-rich lines to trigger Signal C heuristic.
 DIGIT_LINE_THRESHOLD = 5
 
@@ -60,10 +72,10 @@ def has_table_structure(image_path: str | Path) -> bool:
     _, binary = cv2.threshold(img, 180, 255, cv2.THRESH_BINARY_INV)
 
     h_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT, (img.shape[1] // 4, 1)
+        cv2.MORPH_RECT, (img.shape[1] // H_KERNEL_WIDTH_DIVISOR, 1)
     )
     v_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT, (1, img.shape[0] // 8)
+        cv2.MORPH_RECT, (1, min(img.shape[0] // 8, MAX_V_KERNEL_HEIGHT))
     )
 
     h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel)
