@@ -324,7 +324,7 @@ Run Typhoon OCR on the preprocessed and cropped image.
 **Setup**
 
 ```bash
-pip install typhoon-ocr pillow opencv-python pytesseract pythainlp
+pip install typhoon-ocr pillow opencv-python pytesseract pythainlp rapidfuzz
 export TYPHOON_OCR_API_KEY=your_api_key_here
 ```
 
@@ -491,19 +491,36 @@ def _partial_thai_number(thai_text: str) -> str | None:
         "ศูนย์": 0, "หนึ่ง": 1, "สอง": 2, "สาม": 3, "สี่": 4,
         "ห้า": 5, "หก": 6, "เจ็ด": 7, "แปด": 8, "เก้า": 9,
     }
+    # Use fuzzy matching (rapidfuzz) to handle OCR distortions in Thai text
+    # e.g. "ห้า" → "ห่ำ", "หนึ่ง" → "หหนึ่ง"
+    try:
+        from rapidfuzz import fuzz
+        FUZZY_THRESHOLD = 80
+        def fuzzy_contains(word: str, text: str) -> bool:
+            return any(
+                fuzz.partial_ratio(word, text[i:i+len(word)+2]) >= FUZZY_THRESHOLD
+                for i in range(max(1, len(text) - len(word) - 1))
+            )
+    except ImportError:
+        def fuzzy_contains(word: str, text: str) -> bool:
+            return word in text  # Graceful fallback if rapidfuzz not installed
+
     total = 0
     remaining = thai_text
     for mag_word, mag_val in sorted(THAI_MAGNITUDES.items(), key=lambda x: -x[1]):
-        if mag_word in remaining:
-            prefix, _, remaining = remaining.partition(mag_word)
+        if fuzzy_contains(mag_word, remaining):
+            # Best-effort split at the matched position
+            idx = remaining.find(mag_word) if mag_word in remaining else max(0, len(remaining) // 2)
+            prefix = remaining[:idx]
+            remaining = remaining[idx + len(mag_word):]
             coeff = 1
             for dw, dv in THAI_DIGITS_WORD.items():
-                if dw in prefix:
+                if fuzzy_contains(dw, prefix):
                     coeff = dv
                     break
             total += coeff * mag_val
     for dw, dv in THAI_DIGITS_WORD.items():
-        if dw in remaining:
+        if fuzzy_contains(dw, remaining):
             total += dv
     return str(total) if total > 0 else None
 ```
@@ -525,7 +542,12 @@ def normalize_votes(raw: str) -> str:
     if not raw or str(raw).strip() in ("", "-", "—"):
         return "0"
     cleaned = str(raw).translate(THAI_DIGIT_MAP)
-    result = "".join(OCR_FIXES.get(ch, ch) for ch in cleaned if ch.isdigit() or ch in OCR_FIXES)
+    # Only apply OCR substitutions when the string already contains real digits —
+    # avoids converting non-digit OCR garbage into false numbers
+    if any(c.isdigit() for c in cleaned):
+        result = "".join(OCR_FIXES.get(ch, ch) for ch in cleaned if ch.isdigit() or ch in OCR_FIXES)
+    else:
+        result = "".join(c for c in cleaned if c.isdigit())
     result = "".join(c for c in result if c.isdigit())
     return result if result else "0"
 ```
@@ -612,11 +634,23 @@ def total_based_correction(votes: list[str], ocr_total: int | None) -> list[str]
     if abs(diff) > max(numeric) * 0.2:
         return votes  # Difference too large — do not attempt correction
 
-    # Select the row with the lowest soft-rule confidence to adjust
-    # This targets the row most likely to have been incorrectly extracted
+    # Target the row with the highest combined suspicion score:
+    # - Low soft-rule confidence (low vote value)
+    # - High deviation from the document median (outlier)
     corrected = list(votes)
-    row_confs = [apply_soft_rules(v) for v in votes]
-    best_idx = min(range(len(votes)), key=lambda i: row_confs[i])
+    import statistics
+    numeric_vals = [int(v) for v in votes if v.isdigit()]
+    median_val = statistics.median(numeric_vals) if numeric_vals else 0
+
+    def suspicion_score(i: int) -> float:
+        if not votes[i].isdigit():
+            return float("inf")
+        v = int(votes[i])
+        soft_penalty = 1.0 - apply_soft_rules(votes[i])   # 0 = plausible, 1 = suspicious
+        deviation = abs(v - median_val) / (median_val + 1)  # normalised distance from median
+        return soft_penalty * 0.7 + deviation * 0.3
+
+    best_idx = max(range(len(votes)), key=suspicion_score)
     adjusted = int(votes[best_idx]) + diff if votes[best_idx].isdigit() else None
     if adjusted is not None and 0 <= adjusted <= MAX_VOTE:
         corrected[best_idx] = str(adjusted)
@@ -731,10 +765,17 @@ def ensemble_votes(candidates: list[tuple[float, list[str]]], expected: int) -> 
     results = []
     for i in range(expected):
         vote_weights: Counter = Counter()
+        # Pre-compute agreement counts for this row position across all passes
+        row_values = [votes[i] for _, votes in normalized]
+        consensus: Counter = Counter(row_values)
+        n_passes = len(normalized)
+
         for conf, votes in normalized:
             v = votes[i]
             row_conf = compute_row_confidence(v, i, expected)
-            weight = conf * row_conf
+            # Bonus for values that multiple passes agree on — reduces outlier impact
+            agree_bonus = consensus[v] / n_passes
+            weight = conf * row_conf * (1.0 + agree_bonus)
             vote_weights[v] += weight
         results.append(vote_weights.most_common(1)[0][0])
     return results
@@ -798,7 +839,17 @@ def preprocess_otsu(image_path: str) -> Image.Image:
 
 
 def apply_sanity_checks(votes: list[str]) -> list[str]:
-    return [v if (len(v) <= 7 and not (v.startswith("0") and len(v) > 3)) else "0" for v in votes]
+    result = []
+    for v in votes:
+        if len(v) > 7:
+            result.append("0")  # Impossible vote count
+        elif v.startswith("0") and len(v) > 1:
+            # Strip leading zeros (e.g. "01234" → "1234") rather than discarding entirely
+            stripped = v.lstrip("0") or "0"
+            result.append(stripped)
+        else:
+            result.append(v)
+    return result
 ```
 
 ---
@@ -1020,18 +1071,31 @@ for i, ((prov, dist), group) in enumerate(template.groupby(["province", "distric
         doc_results = [{"id": r["id"], "votes": "0"} for _, r in group.iterrows()]
     else:
         expected = len(group)
-        extracted_votes = []
+        # Anchor-based merge: each page fills its own rows by index position
+        # Prevents duplication and ordering errors when table overflows across pages
+        merged_votes = ["0"] * expected
 
         for page in pages:
-            remaining = expected - len(extracted_votes)
-            votes = extract_votes_multipass(page, remaining)
-            extracted_votes += votes
+            page_md = run_typhoon_ocr(preprocess_image(page))
+            anchored = extract_anchored_rows(page_md)
+            page_aligned = anchor_align(anchored, expected)
+            # Fill only slots where this page provides a non-zero value
+            for i, v in enumerate(page_aligned):
+                if v != "0":
+                    merged_votes[i] = v
             time.sleep(0.5)
-            if len(extracted_votes) >= expected:
-                break
 
-        extracted_votes = normalize_length(extracted_votes, expected)
-        doc_results = align_votes(doc_key, extracted_votes, group)
+        # For any rows still "0" after anchor pass, run multipass OCR as fallback
+        zero_slots = sum(1 for v in merged_votes if v == "0")
+        if zero_slots > expected * 0.2:  # More than 20% missing → retry full multipass
+            for page in pages:
+                fallback_votes = extract_votes_multipass(page, expected)
+                for i, v in enumerate(fallback_votes):
+                    if merged_votes[i] == "0" and v != "0":
+                        merged_votes[i] = v
+                time.sleep(0.5)
+
+        doc_results = align_votes(doc_key, merged_votes, group)
 
     debug_save(doc_key, "final_votes", str([r["votes"] for r in doc_results]))
     all_results.extend(doc_results)
@@ -1091,10 +1155,12 @@ Priority: maximize correctly extracted multi-digit numbers — even a partial ex
 | Thai text cross-check with digit-level diff | Corrects 1–2 digit OCR errors using independent signal |
 | Partial regex Thai number fallback | Recovers cross-check when pythainlp parse fails |
 | Soft confidence penalties (no hard < 100 cutoff) | Preserves correct low-vote fringe candidates |
-| Total row checksum + lowest-confidence correction | Targets the right row when fixing the sum |
+| Total row checksum + median-deviation correction | Targets the most suspicious row by deviation + soft confidence |
 | Per-row confidence via soft rules | Ensemble votes smarter at the row level |
 | Diverse 5-pass ensemble (different crops, preprocessing, Tesseract) | Reduces correlated OCR errors |
+| Agreement bonus in ensemble weighting | Rewards consensus across passes, dampens outlier passes |
 | Length-normalized ensemble voting | Prevents index-shifted votes from corrupting results |
+| Anchor-based per-page merge | Prevents duplication / ordering errors on multi-page documents |
 | Row anchor alignment | Prevents cascading misalignment when OCR skips a row |
 | OCR cache (3 levels) | Pipeline reruns in seconds instead of 20+ minutes |
 | Checkpointing | Resume on failure without losing progress |
