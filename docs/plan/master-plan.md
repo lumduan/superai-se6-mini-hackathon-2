@@ -7,13 +7,14 @@ Extract structured voting data from scanned Thai election result documents (Form
 Given PNG scans of official election documents, the task is to:
 
 1. Dynamically detect which pages contain vote count tables
-2. Preprocess images (deskew, CLAHE, sharpen) before OCR
-3. Adaptively crop the vote count column using OpenCV line detection
-4. Use Typhoon OCR with multi-pass fallback and ensemble voting
-5. Cross-check digits against Thai number text in parentheses (digit-level diff)
-6. Align rows using candidate number anchors to prevent row-shift errors
-7. Apply total-based correction using the checksum row
-8. Submit only `id,votes` for every row in the template
+2. Preprocess images (angle-limited deskew, CLAHE, sharpen) before OCR
+3. Adaptively crop the vote count column; try multiple ratios as diverse ensemble candidates
+4. Use Typhoon OCR across 5 diverse passes with ensemble voting
+5. Cross-check digits against Thai number text with digit-level diff + partial regex fallback
+6. Apply soft confidence penalties instead of hard value cutoffs
+7. Apply total-based correction targeting the lowest-confidence row
+8. Align rows using candidate number anchors to prevent row-shift errors
+9. Submit only `id,votes` for every row in the template
 
 ---
 
@@ -210,8 +211,10 @@ import cv2
 import numpy as np
 from PIL import Image
 
+MAX_DESKEW_ANGLE = 5.0  # degrees — beyond this, rotation is likely wrong
+
 def deskew(img: np.ndarray) -> np.ndarray:
-    """Correct scan tilt using Hough line angles."""
+    """Correct scan tilt using Hough line angles. Skips if angle is unreliable."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
     lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=200)
@@ -220,7 +223,10 @@ def deskew(img: np.ndarray) -> np.ndarray:
     angles = [(line[0][1] - np.pi / 2) * 180 / np.pi for line in lines]
     angle = np.median(angles)
     if abs(angle) < 0.5:
-        return img  # Skip if tilt is negligible
+        return img  # Negligible tilt — skip
+    if abs(angle) > MAX_DESKEW_ANGLE:
+        print(f"  Deskew: angle {angle:.1f}° exceeds limit — skipping to avoid corruption")
+        return img  # Suspicious angle — noisy scan, do not rotate
     h, w = img.shape[:2]
     M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
     return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
@@ -280,13 +286,33 @@ def detect_rightmost_column_boundary(image_path: str) -> float | None:
     return last_line / img.shape[1]
 
 
-def crop_vote_column(image_path: str, fallback_ratio: float = 0.80) -> Image.Image:
+FALLBACK_CROP_RATIOS = [0.70, 0.75, 0.80, 0.85]
+
+def crop_vote_column(image_path: str) -> Image.Image:
+    """
+    Adaptively crop the vote column.
+    Falls back to trying multiple crop ratios when detection fails —
+    all crops are added as separate ensemble candidates in Phase 11.
+    Returns the best single crop for immediate use.
+    """
     left_ratio = detect_rightmost_column_boundary(image_path)
-    if left_ratio is None or left_ratio < 0.5:
-        left_ratio = fallback_ratio
+    if left_ratio is not None and left_ratio >= 0.5:
+        img = Image.open(image_path)
+        w, h = img.size
+        return img.crop((int(w * left_ratio), 0, w, h))
+
+    # Detection failed — return the most conservative fallback
+    print(f"  Adaptive crop failed for {image_path}, using fallback ratio 0.80")
     img = Image.open(image_path)
-    width, height = img.size
-    return img.crop((int(width * left_ratio), 0, width, height))
+    w, h = img.size
+    return img.crop((int(w * 0.80), 0, w, h))
+
+
+def all_fallback_crops(image_path: str) -> list[Image.Image]:
+    """Return cropped images for all fallback ratios (used to add diversity to ensemble)."""
+    img = Image.open(image_path)
+    w, h = img.size
+    return [img.crop((int(w * r), 0, w, h)) for r in FALLBACK_CROP_RATIOS]
 ```
 
 ---
@@ -433,7 +459,10 @@ def cross_check_vote(raw_cell: str, digit_vote: str) -> str:
     try:
         thai_num = str(thai_word_to_num(thai_text))
     except Exception:
-        return digit_vote
+        # Full parse failed — try partial regex extraction as fallback
+        thai_num = _partial_thai_number(thai_text)
+        if thai_num is None:
+            return digit_vote
 
     if len(thai_num) == len(digit_vote):
         diff = digit_distance(thai_num, digit_vote)
@@ -447,6 +476,36 @@ def cross_check_vote(raw_cell: str, digit_vote: str) -> str:
         return thai_num  # Thai text has one more/fewer digit — trust it
 
     return digit_vote
+
+
+def _partial_thai_number(thai_text: str) -> str | None:
+    """
+    Regex-based partial Thai number extraction as fallback when pythainlp fails.
+    Handles common OCR distortions in the Thai pronunciation text.
+    """
+    THAI_MAGNITUDES = {
+        "ล้าน": 1_000_000, "แสน": 100_000, "หมื่น": 10_000,
+        "พัน": 1_000, "ร้อย": 100, "สิบ": 10,
+    }
+    THAI_DIGITS_WORD = {
+        "ศูนย์": 0, "หนึ่ง": 1, "สอง": 2, "สาม": 3, "สี่": 4,
+        "ห้า": 5, "หก": 6, "เจ็ด": 7, "แปด": 8, "เก้า": 9,
+    }
+    total = 0
+    remaining = thai_text
+    for mag_word, mag_val in sorted(THAI_MAGNITUDES.items(), key=lambda x: -x[1]):
+        if mag_word in remaining:
+            prefix, _, remaining = remaining.partition(mag_word)
+            coeff = 1
+            for dw, dv in THAI_DIGITS_WORD.items():
+                if dw in prefix:
+                    coeff = dv
+                    break
+            total += coeff * mag_val
+    for dw, dv in THAI_DIGITS_WORD.items():
+        if dw in remaining:
+            total += dv
+    return str(total) if total > 0 else None
 ```
 
 ---
@@ -473,21 +532,32 @@ def normalize_votes(raw: str) -> str:
 
 > Avoid aggressive substitutions (S→5, B→8) — they risk corrupting correct digits.
 
-**Hard rule overrides**
+Soft confidence penalties for suspicious values — do **not** hard-override to `"0"` because some legitimate candidates receive fewer than 100 votes in small or fringe constituencies.
 
 ```python
-MIN_VOTE = 100
 MAX_VOTE = 1_000_000
+SOFT_LOW_VOTE = 20   # Below this — penalize confidence only, do not override
+
+def apply_soft_rules(vote: str) -> float:
+    """
+    Return a confidence multiplier for this vote value.
+    Values outside plausible ranges reduce confidence but are not removed.
+    """
+    if not vote.isdigit():
+        return 0.0  # Completely invalid
+    v = int(vote)
+    if v > MAX_VOTE:
+        return 0.1  # Essentially impossible
+    if v < SOFT_LOW_VOTE:
+        return 0.5  # Suspicious but possible in fringe cases
+    return 1.0
+
 
 def apply_hard_rules(vote: str, fallback: str = "0") -> str:
-    """Override votes that fall outside plausible election ranges."""
+    """Only override truly impossible values (> 1M). Never override low votes."""
     if not vote.isdigit():
         return fallback
-    v = int(vote)
-    if v < MIN_VOTE:
-        print(f"  Hard rule: {vote} < {MIN_VOTE} — likely noise")
-        return fallback
-    if v > MAX_VOTE:
+    if int(vote) > MAX_VOTE:
         print(f"  Hard rule: {vote} > {MAX_VOTE} — impossible")
         return fallback
     return vote
@@ -503,8 +573,12 @@ Average vote should not be below 100 — if so, OCR likely captured row numbers.
 
 ```python
 def is_reasonable_distribution(votes: list[str]) -> bool:
-    numeric = [int(v) for v in votes if v.isdigit() and int(v) >= MIN_VOTE]
-    return len(numeric) > 0 and sum(numeric) / len(numeric) > 100
+    numeric = [int(v) for v in votes if v.isdigit()]
+    if not numeric:
+        return False
+    # Use percentile-based threshold: median should be at least 50 to exclude pure noise
+    import statistics
+    return statistics.median(numeric) >= 50
 ```
 
 Check 2 — Checksum using the total row:
@@ -538,11 +612,13 @@ def total_based_correction(votes: list[str], ocr_total: int | None) -> list[str]
     if abs(diff) > max(numeric) * 0.2:
         return votes  # Difference too large — do not attempt correction
 
-    # Find the most plausible row to adjust (closest to diff)
+    # Select the row with the lowest soft-rule confidence to adjust
+    # This targets the row most likely to have been incorrectly extracted
     corrected = list(votes)
-    best_idx = min(range(len(votes)), key=lambda i: abs(int(votes[i]) - abs(diff)) if votes[i].isdigit() else float("inf"))
-    adjusted = int(votes[best_idx]) + diff
-    if MIN_VOTE <= adjusted <= MAX_VOTE:
+    row_confs = [apply_soft_rules(v) for v in votes]
+    best_idx = min(range(len(votes)), key=lambda i: row_confs[i])
+    adjusted = int(votes[best_idx]) + diff if votes[best_idx].isdigit() else None
+    if adjusted is not None and 0 <= adjusted <= MAX_VOTE:
         corrected[best_idx] = str(adjusted)
 
     return corrected
@@ -556,14 +632,10 @@ Track confidence at the row level, not just the document level. This allows the 
 
 ```python
 def compute_row_confidence(vote: str, position: int, total_expected: int) -> float:
-    score = 1.0
+    """Use soft rule multiplier — does not hard-override low votes."""
     if not vote.isdigit():
         return 0.0
-    v = int(vote)
-    if v < MIN_VOTE:
-        score -= 0.5
-    if v > MAX_VOTE:
-        score -= 0.5
+    score = apply_soft_rules(vote)  # 0.0–1.0 based on plausibility
     if len(vote) < 3:
         score -= 0.3
     return max(0.0, score)
@@ -669,6 +741,12 @@ def ensemble_votes(candidates: list[tuple[float, list[str]]], expected: int) -> 
 
 
 def extract_votes_multipass(image_path: str, expected: int) -> list[str]:
+    """
+    Run multiple diverse OCR passes to reduce correlated errors.
+    Passes 1–4 use Typhoon with different inputs (crop ratio, preprocessing, blur)
+    to ensure the ensemble candidates are not all from the same error mode.
+    Pass 5 uses Tesseract as a structurally independent fallback.
+    """
     preprocessed = preprocess_image(image_path)
     candidates = []
 
@@ -684,20 +762,29 @@ def extract_votes_multipass(image_path: str, expected: int) -> list[str]:
         candidates.append((conf, votes))
         return conf, votes
 
-    conf, votes = run_pass("Pass 1 (typhoon crop)", crop_vote_column(image_path))
+    # Pass 1: adaptive crop (Mode A — primary)
+    conf, votes = run_pass("Pass 1 (typhoon adaptive crop)", crop_vote_column(image_path))
     if not needs_fallback(votes, expected, conf):
         return apply_sanity_checks(normalize_length(votes, expected))
 
-    run_pass("Pass 2 (typhoon full)", preprocessed)
+    # Pass 2: full preprocessed image (Mode B — different context)
+    run_pass("Pass 2 (typhoon full preprocessed)", preprocessed)
 
+    # Pass 3: Otsu-threshold only (structurally different from CLAHE)
     conf, _ = run_pass("Pass 3 (typhoon otsu)", preprocess_otsu(image_path))
     if not needs_fallback(votes, expected, conf):
         return apply_sanity_checks(normalize_length(votes, expected))
 
+    # Pass 4: diverse fallback crops — add each ratio as a separate candidate
+    # This breaks correlation by varying the crop boundary systematically
+    for i, fallback_img in enumerate(all_fallback_crops(image_path)):
+        run_pass(f"Pass 4.{i+1} (typhoon crop {FALLBACK_CROP_RATIOS[i]:.2f})", fallback_img)
+
+    # Pass 5: Tesseract — fully independent model (different error mode)
     raw_tess = fallback_tesseract(image_path)
     votes_tess = [normalize_votes(v) for v in raw_tess]
     conf_tess = compute_document_confidence(votes_tess, expected)
-    print(f"  Pass 4 (tesseract): conf={conf_tess:.2f}, rows={len(votes_tess)}")
+    print(f"  Pass 5 (tesseract): conf={conf_tess:.2f}, rows={len(votes_tess)}")
     candidates.append((conf_tess, votes_tess))
 
     final = ensemble_votes(candidates, expected)
@@ -996,13 +1083,17 @@ Priority: maximize correctly extracted multi-digit numbers — even a partial ex
 | Feature | Impact |
 | --- | --- |
 | Dynamic table page detection | Prevents total failure on non-standard layouts |
-| Image preprocessing (deskew + CLAHE + sharpen) | +5–15% OCR accuracy on low-quality scans |
-| Adaptive column crop (OpenCV) | +10–30% accuracy vs fixed ratio |
+| Dynamic table page detection | Prevents total failure on non-standard layouts |
+| Angle-limited deskew (max 5°) | Prevents corrupt rotation on noisy scans |
+| Adaptive column crop + multi-ratio fallback | +10–30% accuracy; diverse crops reduce correlated errors |
+| Image preprocessing (CLAHE + sharpen) | +5–15% OCR accuracy on low-quality scans |
 | Pattern-aware parsing (3–7 digit filter) | Eliminates candidate numbers and noise |
-| Thai text cross-check with digit diff | Corrects 1–2 digit OCR errors using independent signal |
-| Hard rule overrides (< 100 / > 1M) | Eliminates impossible values from noise |
-| Total row checksum + correction | Catches and fixes single-row extraction errors |
-| Per-row confidence scoring | Ensemble votes smarter at the row level |
+| Thai text cross-check with digit-level diff | Corrects 1–2 digit OCR errors using independent signal |
+| Partial regex Thai number fallback | Recovers cross-check when pythainlp parse fails |
+| Soft confidence penalties (no hard < 100 cutoff) | Preserves correct low-vote fringe candidates |
+| Total row checksum + lowest-confidence correction | Targets the right row when fixing the sum |
+| Per-row confidence via soft rules | Ensemble votes smarter at the row level |
+| Diverse 5-pass ensemble (different crops, preprocessing, Tesseract) | Reduces correlated OCR errors |
 | Length-normalized ensemble voting | Prevents index-shifted votes from corrupting results |
 | Row anchor alignment | Prevents cascading misalignment when OCR skips a row |
 | OCR cache (3 levels) | Pipeline reruns in seconds instead of 20+ minutes |
