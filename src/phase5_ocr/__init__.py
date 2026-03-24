@@ -1,4 +1,4 @@
-"""Phase 5 — Typhoon OCR Extraction."""
+"""Phase 5 — Full-Page Typhoon OCR (Primary Path)."""
 
 from .ocr import (
     OCR_CALL_SLEEP,
@@ -9,6 +9,7 @@ from .ocr import (
     TYPHOON_TASK_TYPE,
     TYPHOON_TEMPERATURE,
     TYPHOON_TOP_P,
+    run_full_page_ocr,
     run_typhoon_ocr,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "TYPHOON_TASK_TYPE",
     "TYPHOON_TEMPERATURE",
     "TYPHOON_TOP_P",
+    "run_full_page_ocr",
     "run_typhoon_ocr",
 ]
