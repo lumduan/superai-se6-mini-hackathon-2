@@ -20,8 +20,9 @@ env/
 .ocr_cache/
 debug/*
 !debug/.gitkeep
-!debug/visualise_phase4_crop.py
-!debug/phase4_crop_samples/
+!debug/debug_phase2.py
+!debug/debug_phase3.py
+!debug/debug_single_doc.py
 checkpoint.json
 submission.csv
 
